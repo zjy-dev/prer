@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.*
+repos/
+worktrees/
+records/
+.tmp/
+*.log
