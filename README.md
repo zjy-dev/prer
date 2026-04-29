@@ -53,6 +53,7 @@ PRER_REPO_QUERY='stars:>=500 archived:false is:public language:TypeScript OR lan
 
 ## Layout
 
+- `opencode.json`: project-level OpenCode defaults for model, permissions, and watcher behavior
 - `AGENTS.md`: root orchestrator instructions for the main OpenCode agent
 - `.opencode/agents/prer.md`: implementation subagent definition
 - `src/`: TypeScript orchestrator runtime
@@ -68,3 +69,4 @@ PRER_REPO_QUERY='stars:>=500 archived:false is:public language:TypeScript OR lan
 - GitHub operations are performed with `gh`.
 - Clone and remote configuration assume SSH access.
 - Record files use one JSON object per markdown bullet so they remain both scriptable and readable.
+- Root `opencode.json` ignores `repos/`, `worktrees/`, and other runtime directories in the watcher so nested OSS repositories do not pollute the orchestrator session.
