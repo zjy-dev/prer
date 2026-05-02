@@ -43,6 +43,27 @@ function extractText(parts: OpenCodePromptResult["parts"] = []): string {
     .join("\n")
 }
 
+function extractStructured<T>(response: OpenCodePromptResult): T | undefined {
+  return (response.info?.structured as T | undefined) ?? (response.info?.structured_output as T | undefined)
+}
+
+function isRetryReady(entry: IssueRecordEntry, retryDelayMs: number, now = Date.now()): boolean {
+  if (entry.status === "queued") {
+    return true
+  }
+
+  if (entry.status !== "redo") {
+    return false
+  }
+
+  const updatedAt = entry.updatedAt ? Date.parse(entry.updatedAt) : Number.NaN
+  if (!Number.isFinite(updatedAt)) {
+    return true
+  }
+
+  return now - updatedAt >= retryDelayMs
+}
+
 function normalizeRepository(
   repository: Partial<ProjectCandidate> & { owner?: { login: string } | string | null; repo?: string; name?: string },
 ): ProjectCandidate {
@@ -107,6 +128,7 @@ export class Orchestrator {
   private readonly recordManager: RecordManager
   private readonly activeWorkers = new Map<string, Promise<void>>()
   private readonly modelSelection: ModelSelection | undefined
+  private readonly retryDelayMs = 5 * 60_000
   private rootRuntime: OpencodeRuntime | null = null
   private rootClient: Awaited<ReturnType<OpencodeRuntime["start"]>> | null = null
   private rootSessionId: string | null = null
@@ -149,7 +171,7 @@ export class Orchestrator {
     })
 
     const client = await runtime.start()
-    await listAgents(client)
+    await listAgents(client).catch(() => undefined)
     const session = await createSession(client, "prer orchestrator")
 
     this.rootRuntime = runtime
@@ -163,12 +185,12 @@ export class Orchestrator {
     for (const project of projects) {
       const entries = await this.recordManager.read(project.owner, project.repo)
       for (const entry of entries) {
-        if (entry.status === "running" || entry.status === "redo") {
+        if (entry.status === "running") {
           await this.recordManager.upsert(project.owner, project.repo, {
             ...entry,
             status: "queued",
             assignedTo: "",
-            note: entry.status === "running" ? "recovered from interrupted run" : entry.note,
+            note: "recovered from interrupted run",
           })
         }
       }
@@ -260,7 +282,7 @@ export class Orchestrator {
     for (const target of targets) {
       const entries = await this.recordManager.read(target.owner, target.repo)
       for (const entry of entries) {
-        if (entry.status === "queued") {
+        if (isRetryReady(entry, this.retryDelayMs)) {
           queue.push({ ...target, entry })
         }
       }
@@ -287,7 +309,7 @@ export class Orchestrator {
         defaultBranch: repo.defaultBranch,
         updatedAt: repo.updatedAt,
         description: repo.description || "",
-        language: repo.primaryLanguage?.name || "",
+        language: repo.language || "",
         reason: "",
       }))
       .sort((left, right) => {
@@ -356,9 +378,7 @@ export class Orchestrator {
       },
     })
 
-    const structured =
-      (response.info?.structured_output as Partial<ProjectCandidate> | undefined) ||
-      safeJsonParse<Partial<ProjectCandidate>>(extractText(response.parts || []))
+    const structured = extractStructured<Partial<ProjectCandidate>>(response) || safeJsonParse<Partial<ProjectCandidate>>(extractText(response.parts || []))
 
     if (!structured) {
       return null
@@ -526,9 +546,7 @@ export class Orchestrator {
       },
     })
 
-    const structured =
-      (response.info?.structured_output as { issues?: IssueCandidate[] } | undefined) ||
-      safeJsonParse<{ issues?: IssueCandidate[] }>(extractText(response.parts || []))
+    const structured = extractStructured<{ issues?: IssueCandidate[] }>(response) || safeJsonParse<{ issues?: IssueCandidate[] }>(extractText(response.parts || []))
 
     return Array.isArray(structured?.issues) ? structured.issues.slice(0, 6) : []
   }
@@ -612,9 +630,9 @@ export class Orchestrator {
       const message = error instanceof Error ? error.stack || error.message : String(error)
       await this.recordManager.upsert(project.owner, project.repo, {
         ...recordEntry,
-        status: "queued",
+        status: "redo",
         assignedTo: "",
-        note: "worker failed and re-queued",
+        note: `worker failed; retry after ${Math.round(this.retryDelayMs / 1000)}s backoff`,
         lastError: message,
       })
       throw error
@@ -704,7 +722,7 @@ export class Orchestrator {
         },
       })
 
-      const structured = response.info?.structured_output as PrerResult | undefined
+      const structured = extractStructured<PrerResult>(response)
       if (structured) {
         return structured
       }
@@ -823,10 +841,7 @@ export class Orchestrator {
       },
     })
 
-    return (
-      (response.info?.structured_output as ValidationResult | undefined) ||
-      safeJsonParse<ValidationResult>(extractText(response.parts || []))
-    )
+    return extractStructured<ValidationResult>(response) || safeJsonParse<ValidationResult>(extractText(response.parts || []))
   }
 
   async shutdown(): Promise<void> {

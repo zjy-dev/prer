@@ -1,7 +1,7 @@
 ---
 description: Handles a single assigned OSS issue end-to-end and opens a PR
 mode: subagent
-model: openai/gpt-5
+model: feiyao/gpt-5.5
 temperature: 0.1
 permission:
   task: deny

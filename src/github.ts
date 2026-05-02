@@ -84,7 +84,7 @@ export class GitHubClient {
       "--limit",
       String(limit),
       "--json",
-      "name,owner,description,sshUrl,isArchived,isFork,stargazersCount,updatedAt,url,defaultBranch,primaryLanguage",
+      "name,owner,description,isArchived,isFork,stargazersCount,updatedAt,url,defaultBranch,language",
     ])
 
     return JSON.parse(stdout) as GitHubRepositorySearchItem[]
@@ -123,16 +123,13 @@ export class GitHubClient {
 
   async searchIssuePrs(owner: string, repo: string, issueNumber: number): Promise<GitHubPullRequestSearchResult[]> {
     const { stdout } = await collect("gh", [
-      "search",
-      "prs",
-      `${issueNumber} repo:${owner}/${repo} state:open`,
-      "--limit",
-      "20",
-      "--json",
-      "number,title,state,url,updatedAt,headRepositoryOwner,headRefName,baseRefName,isDraft",
+      "api",
+      `search/issues?q=${issueNumber}+repo:${owner}/${repo}+type:pr+state:open&per_page=20`,
+      "--jq",
+      ".items[] | {number, title, state, url: .html_url, updatedAt: .updated_at, isDraft: .draft}",
     ])
 
-    return JSON.parse(stdout) as GitHubPullRequestSearchResult[]
+    return stdout.trim() ? (stdout.trim().split("\n").map(line => JSON.parse(line))) : []
   }
 
   async forkRepo(owner: string, repo: string): Promise<{ name: string; owner: { login: string }; sshUrl: string; url: string }> {
@@ -145,23 +142,38 @@ export class GitHubClient {
       }
     }
 
-    const { stdout } = await collect("gh", ["repo", "fork", `${owner}/${repo}`, "--clone=false", "--remote=false"])
+    const { stdout: loginOut } = await collect("gh", ["api", "user", "--jq", ".login"])
+    const login = loginOut.trim()
 
-    const forkUrl = stdout.trim().replace(/\.git$/, "")
-    const match = forkUrl.match(/github\.com[:/](.+?)\/(.+)$/)
-    const forkOwner = match?.[1]
-    const forkRepo = match?.[2]
+    try {
+      const result = await collect("gh", ["repo", "fork", `${owner}/${repo}`, "--clone=false"])
+      const forkUrl = result.stdout.trim() || result.stderr.trim()
 
-    if (!forkOwner || !forkRepo) {
-      throw new Error(`Unable to parse gh repo fork output: ${stdout}`)
+      const match = forkUrl.match(/github\.com[/:](.+?)\/(.+?)(?:\.git)?$/)
+      if (match) {
+        return {
+          name: match[2],
+          owner: { login: match[1] },
+          sshUrl: `git@github.com:${match[1]}/${match[2]}.git`,
+          url: `https://github.com/${match[1]}/${match[2]}`,
+        }
+      }
+    } catch {
+      // fork may already exist
     }
 
-    return {
-      name: forkRepo,
-      owner: { login: forkOwner },
-      sshUrl: `git@github.com:${forkOwner}/${forkRepo}.git`,
-      url: `https://github.com/${forkOwner}/${forkRepo}`,
+    const { stdout: repoOut } = await collect("gh", ["api", `repos/${login}/${repo}`, "--jq", ".html_url"])
+    const existingUrl = repoOut.trim()
+    if (existingUrl) {
+      return {
+        name: repo,
+        owner: { login },
+        sshUrl: `git@github.com:${login}/${repo}.git`,
+        url: existingUrl,
+      }
     }
+
+    throw new Error(`Unable to fork or find existing fork for ${owner}/${repo}`)
   }
 
   async authStatus(): Promise<string> {

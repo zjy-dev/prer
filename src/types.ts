@@ -62,7 +62,7 @@ export interface GitHubRepositorySearchItem {
   updatedAt: string
   url: string
   defaultBranch: string
-  primaryLanguage?: GitHubLanguage | null
+  language?: string | null
 }
 
 export type GitHubIssueComments = number | Array<Record<string, unknown>>
@@ -198,6 +198,14 @@ export interface OpenCodeTextPart {
 }
 
 export interface OpenCodePromptInfo {
+  id?: string
+  role?: string
+  parentID?: string
+  time?: {
+    created?: number
+    completed?: number
+  }
+  structured?: unknown
   structured_output?: unknown
 }
 

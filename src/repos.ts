@@ -1,6 +1,6 @@
 import { constants } from "node:fs"
 import { spawn } from "node:child_process"
-import { access, mkdir } from "node:fs/promises"
+import { access, mkdir, rm } from "node:fs/promises"
 import path from "node:path"
 import type { CommandResult } from "./types.js"
 
@@ -44,6 +44,8 @@ async function exists(target: string): Promise<boolean> {
 }
 
 export class RepoManager {
+  private readonly inflight = new Map<string, Promise<string>>()
+
   constructor(private readonly options: { reposDir: string; dryRun?: boolean }) {}
 
   repoPath(owner: string, repo: string): string {
@@ -57,8 +59,29 @@ export class RepoManager {
   async cloneIfNeeded(params: { upstreamOwner: string; repo: string; forkOwner: string }): Promise<string> {
     const repoPath = this.repoPath(params.upstreamOwner, params.repo)
 
+    const existingInflight = this.inflight.get(repoPath)
+    if (existingInflight) {
+      return existingInflight
+    }
+
+    const operation = this.cloneIfNeededInternal(params, repoPath).finally(() => {
+      this.inflight.delete(repoPath)
+    })
+    this.inflight.set(repoPath, operation)
+    return operation
+  }
+
+  private async cloneIfNeededInternal(
+    params: { upstreamOwner: string; repo: string; forkOwner: string },
+    repoPath: string,
+  ): Promise<string> {
+
     if (await exists(repoPath)) {
-      await this.ensureRemotes({ repoPath, ...params })
+      try {
+        await this.ensureRemotes({ repoPath, ...params })
+      } catch {
+        // Keep using the local clone when network refresh fails.
+      }
       return repoPath
     }
 
@@ -67,7 +90,13 @@ export class RepoManager {
       return repoPath
     }
 
-    await runGit(["clone", `git@github.com:${params.forkOwner}/${params.repo}.git`, repoPath], this.options.reposDir)
+    try {
+      await runGit(["clone", `git@github.com:${params.forkOwner}/${params.repo}.git`, repoPath], this.options.reposDir)
+    } catch (error) {
+      await rm(repoPath, { recursive: true, force: true }).catch(() => undefined)
+      throw error
+    }
+
     await this.ensureRemotes({ repoPath, ...params })
     return repoPath
   }

@@ -79,7 +79,13 @@ export class WorktreeManager {
       return { worktreePath, branchName }
     }
 
-    await runGit(["fetch", "upstream", params.defaultBranch], params.repoPath)
+    try {
+      await runGit(["fetch", "upstream", params.defaultBranch], params.repoPath)
+    } catch (error) {
+      await runGit(["rev-parse", "--verify", `refs/remotes/upstream/${params.defaultBranch}`], params.repoPath).catch(() => {
+        throw error
+      })
+    }
     await runGit(["worktree", "prune"], params.repoPath)
     await runGit(
       ["worktree", "add", "-B", branchName, worktreePath, `upstream/${params.defaultBranch}`],

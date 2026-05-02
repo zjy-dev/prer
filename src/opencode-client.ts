@@ -28,6 +28,11 @@ type PromptBody = Omit<SessionPromptParameters, "sessionID" | "directory" | "wor
   format?: OutputFormat
 }
 
+interface SessionMessageEnvelope {
+  info?: OpenCodePromptResult["info"]
+  parts?: OpenCodePromptResult["parts"]
+}
+
 function startServerProcess({ opencodeBin, cwd, port, hostname = "127.0.0.1", configDir, env = {} }: RuntimeOptions): ServerProcess {
   const child = spawn(opencodeBin, ["serve", "--hostname", hostname, "--port", String(port)], {
     cwd,
@@ -58,17 +63,40 @@ function startServerProcess({ opencodeBin, cwd, port, hostname = "127.0.0.1", co
   }
 }
 
-async function waitForHealth(client: OpencodeClient, attempts = 40): Promise<void> {
+async function waitForHealth(port: number, attempts = 40): Promise<void> {
   for (let index = 0; index < attempts; index += 1) {
     try {
-      await client.global.health()
-      return
-    } catch {
-      await sleep(500)
-    }
+      const res = await fetch(`http://127.0.0.1:${port}/health`)
+      if (res.ok) return
+      const text = await res.text().catch(() => "")
+      if (text.includes("opencode") || text.includes("html") || text.length > 0) return
+    } catch {}
+    await sleep(500)
   }
 
   throw new Error("OpenCode server did not become healthy in time")
+}
+
+function extractMessages(raw: unknown): SessionMessageEnvelope[] {
+  const value = raw as { data?: unknown; messages?: unknown }
+  const data = value?.data ?? raw
+
+  if (Array.isArray(data)) {
+    return data as SessionMessageEnvelope[]
+  }
+
+  if (data && typeof data === "object" && Array.isArray((data as { messages?: unknown[] }).messages)) {
+    return (data as { messages: SessionMessageEnvelope[] }).messages
+  }
+
+  return []
+}
+
+function toPromptResult(message: SessionMessageEnvelope): OpenCodePromptResult {
+  return {
+    info: message.info,
+    parts: Array.isArray(message.parts) ? message.parts : [],
+  }
 }
 
 export class OpencodeRuntime {
@@ -85,7 +113,7 @@ export class OpencodeRuntime {
     })
 
     try {
-      await waitForHealth(client)
+      await waitForHealth(this.options.port)
     } catch (error) {
       server.child.kill("SIGTERM")
       const logs = server.getLogs()
@@ -120,12 +148,58 @@ export async function promptSession(
   sessionId: string,
   body: PromptBody,
 ): Promise<OpenCodePromptResult> {
-  const response = await client.session.prompt({
+  const beforeResponse = await client.session.messages({
+    sessionID: sessionId,
+    limit: 50,
+  })
+  const knownMessageIds = new Set(
+    extractMessages(beforeResponse)
+      .map((message) => message.info?.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  )
+  const startedAt = Date.now()
+
+  const promptResponse = await client.session.prompt({
     sessionID: sessionId,
     ...body,
   })
 
-  return response.data as OpenCodePromptResult
+  const direct = (promptResponse as { data?: unknown }).data ?? promptResponse
+  if (direct && typeof direct === "object") {
+    const directResult = toPromptResult(direct as SessionMessageEnvelope)
+    if (directResult.info?.role === "assistant") {
+      return directResult
+    }
+  }
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await sleep(1000)
+
+    const messagesResponse = await client.session.messages({
+      sessionID: sessionId,
+      limit: 10,
+    })
+
+    const assistantMessages = extractMessages(messagesResponse)
+      .filter((message) => message.info?.role === "assistant")
+      .filter((message) => {
+        const id = message.info?.id
+        const createdAt = message.info?.time?.created ?? 0
+        return (id ? !knownMessageIds.has(id) : true) || createdAt >= startedAt
+      })
+      .sort((left, right) => (right.info?.time?.created ?? 0) - (left.info?.time?.created ?? 0))
+
+    for (const message of assistantMessages) {
+      const hasStructured = message.info?.structured !== undefined || message.info?.structured_output !== undefined
+      const hasParts = Array.isArray(message.parts) && message.parts.length > 0
+      const completed = Boolean(message.info?.time?.completed)
+      if (hasStructured || hasParts || completed) {
+        return toPromptResult(message)
+      }
+    }
+  }
+
+  throw new Error(`Timeout waiting for assistant message`)
 }
 
 export async function listAgents(client: OpencodeClient): Promise<unknown> {
